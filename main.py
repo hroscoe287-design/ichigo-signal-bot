@@ -9,11 +9,24 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from websocket import create_connection
 
+POCKET_WS_DEFAULTS = [
+    "wss://api-c.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket",
+]
+POCKET_WS_HEADERS = [
+    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language: en-US,en;q=0.9",
+]
+
 app = FastAPI(title="ICHIGO SIGNAL BOT")
 
 ASSET = os.getenv("ASSET", "EURUSD_otc")
 TIMEFRAME = int(os.getenv("TIMEFRAME", "60"))
 POCKET_WS_URL = os.getenv("POCKET_WS_URL") or os.getenv("POCKET_URL", "")
+POCKET_WS_URLS = [POCKET_WS_URL] if POCKET_WS_URL else POCKET_WS_DEFAULTS
 PO_AUTH_JSON = os.getenv("PO_AUTH_JSON", "")
 
 state = {
@@ -89,23 +102,39 @@ def score_signal():
 
 
 def feed_worker():
-    if not POCKET_WS_URL:
-        print("FEED: missing POCKET_WS_URL/POCKET_URL", flush=True)
-        return
     if not PO_AUTH_JSON:
         print("FEED: missing PO_AUTH_JSON", flush=True)
         return
     while True:
         ws = None
         try:
-            ws = create_connection(POCKET_WS_URL, timeout=25)
             auth = json.loads(PO_AUTH_JSON)
+            connected = False
+            for url in POCKET_WS_URLS:
+                try:
+                    print(f"FEED: trying {url}", flush=True)
+                    ws = create_connection(url, timeout=20, header=POCKET_WS_HEADERS, origin="https://pocketoption.com", suppress_origin=True)
+                    connected = True
+                    break
+                except Exception as endpoint_exc:
+                    print(f"FEED: endpoint failed {type(endpoint_exc).__name__}: {endpoint_exc}", flush=True)
+            if not connected or ws is None:
+                raise RuntimeError("No Pocket Option WebSocket endpoint accepted the connection")
+            first = ws.recv()
+            if isinstance(first, bytes):
+                first = first.decode("utf-8", errors="ignore")
+            print(f"FEED: handshake {str(first)[:80]}", flush=True)
+            if str(first).startswith("2"):
+                ws.send("3")
             ws.send("40")
             ws.send("42" + json.dumps(["auth", auth], separators=(",", ":")))
             print("FEED: websocket connected; auth sent", flush=True)
 
             while True:
                 msg = ws.recv()
+                if msg == "2":
+                    ws.send("3")
+                    continue
                 if not msg:
                     continue
                 if isinstance(msg, bytes):
