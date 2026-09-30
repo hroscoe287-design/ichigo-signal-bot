@@ -101,6 +101,29 @@ def score_signal():
     return direction, score, "Multi-factor confluence confirmed"
 
 
+def parse_auth(value):
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("PO_AUTH_JSON is empty")
+    try:
+        obj = json.loads(value)
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, list) and len(obj) >= 2 and obj[0] == "auth":
+            return obj[1]
+    except json.JSONDecodeError:
+        pass
+    if value.startswith("42"):
+        obj = json.loads(value[2:])
+        if isinstance(obj, list) and len(obj) >= 2 and obj[0] == "auth":
+            return obj[1]
+    if value.startswith("40"):
+        obj = json.loads(value[2:])
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("PO_AUTH_JSON is not valid JSON or a supported auth packet")
+
+
 def feed_worker():
     if not PO_AUTH_JSON:
         print("FEED: missing PO_AUTH_JSON", flush=True)
@@ -108,38 +131,46 @@ def feed_worker():
     while True:
         ws = None
         try:
-            auth = json.loads(PO_AUTH_JSON)
+            auth = parse_auth(PO_AUTH_JSON)
             connected = False
             for url in POCKET_WS_URLS:
                 try:
                     print(f"FEED: trying {url}", flush=True)
-                    ws = create_connection(url, timeout=20, header=POCKET_WS_HEADERS, origin="https://pocketoption.com", suppress_origin=True)
+                    ws = create_connection(
+                        url, timeout=20, header=POCKET_WS_HEADERS,
+                        origin="https://pocketoption.com", suppress_origin=True
+                    )
                     connected = True
                     break
                 except Exception as endpoint_exc:
                     print(f"FEED: endpoint failed {type(endpoint_exc).__name__}: {endpoint_exc}", flush=True)
             if not connected or ws is None:
                 raise RuntimeError("No Pocket Option WebSocket endpoint accepted the connection")
+
             first = ws.recv()
             if isinstance(first, bytes):
                 first = first.decode("utf-8", errors="ignore")
-            print(f"FEED: handshake {str(first)[:80]}", flush=True)
-            if str(first).startswith("2"):
+            first = str(first)
+            print(f"FEED: handshake {first[:80]}", flush=True)
+            if first.startswith("2"):
                 ws.send("3")
+
             ws.send("40")
             ws.send("42" + json.dumps(["auth", auth], separators=(",", ":")))
             print("FEED: websocket connected; auth sent", flush=True)
 
             while True:
                 msg = ws.recv()
-                if msg == "2":
-                    ws.send("3")
-                    continue
                 if not msg:
                     continue
                 if isinstance(msg, bytes):
                     msg = msg.decode("utf-8", errors="ignore")
+                msg = str(msg)
+                if msg == "2":
+                    ws.send("3")
+                    continue
                 parse_message(msg)
+
         except Exception as exc:
             with lock:
                 state["connected"] = False
@@ -154,14 +185,24 @@ def feed_worker():
 
 
 def parse_message(msg):
-    payload = msg
+    if not msg:
+        return
+    payload = str(msg).strip()
+
     if payload.startswith("42"):
         payload = payload[2:]
+    elif payload.startswith(("40", "41", "44")):
+        return
+    elif payload.startswith("0"):
+        payload = payload[1:]
     elif payload.startswith("4"):
         payload = payload[1:]
+    else:
+        return
+
     try:
         data = json.loads(payload)
-    except Exception:
+    except (TypeError, ValueError):
         return
 
     def consume(obj):
@@ -174,7 +215,7 @@ def parse_message(msg):
                     try:
                         add_tick(time.time(), float(obj[key]))
                         return
-                    except Exception:
+                    except (TypeError, ValueError):
                         pass
             for key in ("history", "candles", "data"):
                 if key in obj and isinstance(obj[key], list):
@@ -190,7 +231,6 @@ def parse_message(msg):
     with lock:
         if state["last_tick"] != before:
             state["connected"] = True
-
 
 def signal_loop():
     while True:
