@@ -4,18 +4,20 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ICHIGO SIGNAL BOT</title>
 <style>
-:root{--bg:#07070b;--panel:#111118;--line:#292936;--text:#f5f5f7;--muted:#9898a8;--red:#ff3b30;--white:#fff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% 0,#241018 0,#07070b 42%);color:var(--text);font-family:Inter,system-ui,sans-serif}
-.wrap{max-width:1180px;margin:auto;padding:16px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.brand{font-weight:900;letter-spacing:.12em}.sub{color:var(--muted);font-size:12px;margin-top:4px}
-.status{border:1px solid var(--line);padding:9px 12px;border-radius:999px;font-size:12px}.live{color:#72ff9a}
-.grid{display:grid;grid-template-columns:1.8fr .8fr;gap:14px;margin-top:14px}.card{background:rgba(17,17,24,.92);border:1px solid var(--line);border-radius:16px;padding:14px}.chartcard{min-width:0}.charthead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.pair{font-weight:800}.muted{color:var(--muted);font-size:12px}
-canvas{display:block;width:100%;height:430px;background:#0b0b10;border-radius:12px}.meter{position:relative;min-height:430px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+:root{--bg:#07070b;--panel:rgba(10,10,16,.84);--line:#3a2530;--text:#f5f5f7;--muted:#aaa0a8;--red:#ff3b30}
+*{box-sizing:border-box}body{margin:0;background:#050509;color:var(--text);font-family:Inter,system-ui,sans-serif;min-height:100vh}
+body:before{content:"";position:fixed;inset:0;background:linear-gradient(90deg,rgba(4,4,8,.96) 0%,rgba(4,4,8,.76) 42%,rgba(4,4,8,.36) 100%),url('/ichigo-bg.jpg') center top/cover no-repeat;z-index:-2}
+body:after{content:"";position:fixed;inset:0;background:radial-gradient(circle at 78% 35%,rgba(255,45,30,.20),transparent 38%),linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.68));z-index:-1;pointer-events:none}
+.wrap{max-width:1180px;margin:auto;padding:16px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.brand{font-weight:900;letter-spacing:.12em;text-shadow:0 0 16px rgba(255,50,40,.5)}.sub{color:#c7bfc4;font-size:12px;margin-top:4px}
+.status{border:1px solid var(--line);padding:9px 12px;border-radius:999px;font-size:12px;background:rgba(8,8,12,.72);backdrop-filter:blur(8px)}.live{color:#72ff9a}
+.grid{display:grid;grid-template-columns:1.8fr .8fr;gap:14px;margin-top:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;backdrop-filter:blur(8px);box-shadow:0 12px 40px rgba(0,0,0,.38)}.chartcard{min-width:0}.charthead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.pair{font-weight:800}.muted{color:var(--muted);font-size:12px}
+canvas{display:block;width:100%;height:430px;background:rgba(5,5,9,.76);border-radius:12px}.meter{position:relative;min-height:430px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}.meter:before{content:"卍解";position:absolute;font-size:130px;font-weight:900;color:rgba(255,40,30,.035);transform:rotate(-12deg);pointer-events:none}
 .ichigo{font-size:92px;line-height:1;filter:drop-shadow(0 0 0 transparent);transition:.35s}.power{font-size:52px;font-weight:950;margin-top:10px}.sig{font-size:28px;font-weight:950;letter-spacing:.12em;margin-top:4px}.reason{color:var(--muted);text-align:center;margin-top:8px;font-size:13px}
-.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.pill{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#0c0c12;color:var(--text)}
-.rows{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}.metric{padding:12px;background:#0d0d13;border:1px solid var(--line);border-radius:12px}.metric b{display:block;font-size:18px;margin-top:4px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.pill{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:rgba(8,8,12,.78);color:var(--text);backdrop-filter:blur(8px)}
+.rows{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}.metric{padding:12px;background:rgba(8,8,12,.78);border:1px solid var(--line);border-radius:12px}.metric b{display:block;font-size:18px;margin-top:4px}
 .glow75{filter:drop-shadow(0 0 10px rgba(255,255,255,.35))}.glow80{filter:drop-shadow(0 0 18px rgba(255,70,70,.55))}.glow90{filter:drop-shadow(0 0 28px rgba(255,40,40,.8))}.glow95{filter:drop-shadow(0 0 42px rgba(255,255,255,.95))}.bankai{animation:pulse .8s infinite alternate}
 @keyframes pulse{to{transform:scale(1.08);filter:drop-shadow(0 0 60px rgba(255,40,40,1))}}
-@media(max-width:800px){.grid{grid-template-columns:1fr}.rows{grid-template-columns:repeat(2,1fr)}canvas{height:330px}.meter{min-height:300px}}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.rows{grid-template-columns:repeat(2,1fr)}canvas{height:330px}.meter{min-height:300px}body:before{background-position:center top}}
 </style>
 </head>
 <body>
@@ -31,13 +33,12 @@ canvas{display:block;width:100%;height:430px;background:#0b0b10;border-radius:12
 <script>
 const $=id=>document.getElementById(id);const c=$("chart"),ctx=c.getContext("2d");
 function resize(){const r=c.getBoundingClientRect(),d=devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);draw(window.last||[])}window.addEventListener("resize",resize);
-function draw(cs){const w=c.clientWidth,h=c.clientHeight;ctx.clearRect(0,0,w,h);if(!cs.length){ctx.fillStyle="#777";ctx.fillText("Waiting for live candles…",18,30);return}
+function draw(cs){const w=c.clientWidth,h=c.clientHeight;ctx.clearRect(0,0,w,h);if(!cs.length){ctx.fillStyle="#aaa";ctx.fillText("Waiting for live candles…",18,30);return}
 const pad={l:12,r:10,t:12,b:22},vw=w-pad.l-pad.r,vh=h-pad.t-pad.b,shown=cs.slice(-80);let lo=Math.min(...shown.map(x=>x.low)),hi=Math.max(...shown.map(x=>x.high));const span=(hi-lo)||1;
 const x=i=>pad.l+i*(vw/(shown.length-1||1));const y=v=>pad.t+(hi-v)/span*vh;
-ctx.strokeStyle="#20202a";ctx.lineWidth=1;for(let i=1;i<5;i++){let yy=pad.t+i*vh/5;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke()}
+ctx.strokeStyle="rgba(255,255,255,.08)";ctx.lineWidth=1;for(let i=1;i<5;i++){let yy=pad.t+i*vh/5;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke()}
 const bw=Math.max(3,vw/shown.length*.62);shown.forEach((q,i)=>{const xx=x(i),up=q.close>=q.open;ctx.strokeStyle=up?"#77ff9a":"#ff4b4b";ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(xx,y(q.high));ctx.lineTo(xx,y(q.low));ctx.stroke();const top=y(Math.max(q.open,q.close)),bot=y(Math.min(q.open,q.close));ctx.fillRect(xx-bw/2,top,bw,Math.max(1,bot-top))});
-ctx.fillStyle="#aaa";ctx.font="11px system-ui";ctx.fillText(hi.toFixed(5),pad.l,pad.t+10);ctx.fillText(lo.toFixed(5),pad.l,h-4)
-}
+ctx.fillStyle="#bbb";ctx.font="11px system-ui";ctx.fillText(hi.toFixed(5),pad.l,pad.t+10);ctx.fillText(lo.toFixed(5),pad.l,h-4)}
 function meter(score,sig){$("power").textContent=score+"%";$("sig").textContent=sig;const el=$("ichigo");el.className="ichigo";if(score>=95)el.classList.add("glow95","bankai");else if(score>=90)el.classList.add("glow90");else if(score>=80)el.classList.add("glow80");else if(score>=75)el.classList.add("glow75")}
 async function tick(){try{const s=await fetch("/api/state").then(r=>r.json());window.last=s.candles||[];$("status").innerHTML="FEED: <span class='"+(s.connected?"live":"")+"'>"+(s.connected?"LIVE":"WAITING")+"</span>";$("price").textContent=s.price??"—";$("pair").textContent=s.asset;$("tf").textContent=(s.timeframe/60)+"m";$("age").textContent="AGE: "+(s.age==null?"—":s.age+"s");$("count").textContent=s.candles.length;$("sig").textContent=s.signal;$("reason").textContent=s.reason;meter(s.score,s.signal);let cs=s.candles;if(cs.length>=20){const a=cs[cs.length-9].close,b=cs[cs.length-20].close;$("trend").textContent=a>b?"BULLISH":"BEARISH";$("mom").textContent=cs[cs.length-1].close>cs[Math.max(0,cs.length-6)].close?"UP":"DOWN"}draw(cs)}catch(e){}}
 resize();tick();setInterval(tick,1000);
