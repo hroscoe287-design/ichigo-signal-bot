@@ -13,7 +13,7 @@ app = FastAPI(title="ICHIGO SIGNAL BOT")
 
 ASSET = os.getenv("ASSET", "EURUSD_otc")
 TIMEFRAME = int(os.getenv("TIMEFRAME", "60"))
-POCKET_WS_URL = os.getenv("POCKET_WS_URL", "")
+POCKET_WS_URL = os.getenv("POCKET_WS_URL") or os.getenv("POCKET_URL", "")
 PO_AUTH_JSON = os.getenv("PO_AUTH_JSON", "")
 
 state = {
@@ -89,18 +89,20 @@ def score_signal():
 
 
 def feed_worker():
-    if not POCKET_WS_URL or not PO_AUTH_JSON:
+    if not POCKET_WS_URL:
+        print("FEED: missing POCKET_WS_URL/POCKET_URL", flush=True)
+        return
+    if not PO_AUTH_JSON:
+        print("FEED: missing PO_AUTH_JSON", flush=True)
         return
     while True:
         ws = None
         try:
             ws = create_connection(POCKET_WS_URL, timeout=25)
-            with lock:
-                state["connected"] = True
-
             auth = json.loads(PO_AUTH_JSON)
             ws.send("40")
             ws.send("42" + json.dumps(["auth", auth], separators=(",", ":")))
+            print("FEED: websocket connected; auth sent", flush=True)
 
             while True:
                 msg = ws.recv()
@@ -109,9 +111,10 @@ def feed_worker():
                 if isinstance(msg, bytes):
                     msg = msg.decode("utf-8", errors="ignore")
                 parse_message(msg)
-        except Exception:
+        except Exception as exc:
             with lock:
                 state["connected"] = False
+            print(f"FEED: connection error: {type(exc).__name__}: {exc}", flush=True)
             time.sleep(3)
         finally:
             try:
@@ -152,7 +155,12 @@ def parse_message(msg):
             for item in obj:
                 consume(item)
 
+    with lock:
+        before = state["last_tick"]
     consume(data)
+    with lock:
+        if state["last_tick"] != before:
+            state["connected"] = True
 
 
 def signal_loop():
