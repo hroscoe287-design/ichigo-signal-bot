@@ -116,7 +116,7 @@ class SignalEngine:
         fd = v.get("fractal_down")
         fu = v.get("fractal_up")
         fractal_dir = "CALL" if fd and not fu else "PUT" if fu and not fd else "WAIT"
-        vote(f"Fractal ({v.get(\"fractal_span\",2)})", fractal_dir, 4.0)
+        vote(f"Fractal ({v.get('fractal_span', 2)})", fractal_dir, 4.0)
 
         psar = v.get("psar")
         psar_dir = "CALL" if price is not None and psar is not None and price > psar else "PUT" if price is not None and psar is not None and price < psar else "WAIT"
