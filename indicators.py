@@ -125,7 +125,7 @@ def stochastic(df,k_period=14,d_period=3,smooth=3):
  d=k.rolling(d_period).mean()
  return k,d
 
-def adx_dmi(df,n=14):
+def adx_dmi(df,n=14,adx_smoothing=7):
  high=df.high.astype(float); low=df.low.astype(float); close=df.close.astype(float)
  up=high.diff()
  down=-low.diff()
@@ -136,7 +136,7 @@ def adx_dmi(df,n=14):
  plus_di=100*plus_dm.ewm(alpha=1/n,adjust=False).mean()/atr_w.replace(0,np.nan)
  minus_di=100*minus_dm.ewm(alpha=1/n,adjust=False).mean()/atr_w.replace(0,np.nan)
  dx=100*(plus_di-minus_di).abs()/(plus_di+minus_di).replace(0,np.nan)
- adx=dx.ewm(alpha=1/n,adjust=False).mean()
+ adx=dx.ewm(alpha=1/adx_smoothing,adjust=False).mean()
  return adx,plus_di,minus_di
 
 def supertrend(df,period=10,multiplier=3.0):
@@ -189,21 +189,21 @@ def ut_bot_direction(df, key_value=4.0, atr_period=10):
   direction[j]=1 if close[j]>stop[j] else -1 if close[j]<stop[j] else direction[j-1]
  return pd.Series(direction,index=df.index)
 
-def calculate(candles):
+def calculate(candles, adx_period=14, adx_smoothing=7, fractal_span=2):
  if len(candles)<35:return {"ready":False,"reason":"Need at least 35 candles","values":{}}
  df=pd.DataFrame(candles); close=df.close.astype(float)
  e9,e20,e50=ema(close,9),ema(close,20),ema(close,50)
- m,ms,mh=macd(close); om,oms,omh=osma(close,10,20,24); ps=psar(df); jaw,teeth,lips=alligator(df); fu,fd=fractal(df,2)
+ m,ms,mh=macd(close); om,oms,omh=osma(close,10,20,24); ps=psar(df); jaw,teeth,lips=alligator(df); fu,fd=fractal(df,fractal_span)
  tenkan_s,kijun_s,span_a,span_b=ichimoku(df,9,26,52)
  bbmid,bbup,bblow,bbwidth,bbpct=bollinger(close,20,2.0)
  atr_series=atr(df)
  atr_base=atr_series.rolling(50,min_periods=14).mean()
  st,st_dir=supertrend(df,10,3.0)
- fcb_upper,fcb_lower,fcb_mid=fractal_chaos_bands(df,2)
+ fcb_upper,fcb_lower,fcb_mid=fractal_chaos_bands(df,fractal_span)
  ut_fast=ut_bot_direction(df,1.2,10)
  ut_slow=ut_bot_direction(df,1.5,20)
  stoch_k,stoch_d=stochastic(df,14,3,3)
- adx_series,plus_di,minus_di=adx_dmi(df,14)
+ adx_series,plus_di,minus_di=adx_dmi(df,adx_period,adx_smoothing)
  cci_series=cci(df,14)
  demarker_series=demarker(df,9)
  wma9=wma(close,9)
@@ -270,7 +270,7 @@ def calculate(candles):
   "alligator_jaw_prev":float(jaw.iloc[-2]) if len(jaw)>1 and pd.notna(jaw.iloc[-2]) else None,
   "alligator_teeth_prev":float(teeth.iloc[-2]) if len(teeth)>1 and pd.notna(teeth.iloc[-2]) else None,
   "alligator_lips_prev":float(lips.iloc[-2]) if len(lips)>1 and pd.notna(lips.iloc[-2]) else None,
-  "fractal_up":bool(fu.iloc[-3]),"fractal_down":bool(fd.iloc[-3]),
+  "fractal_span":fractal_span,"fractal_up":bool(fu.iloc[-(fractal_span+1)]),"fractal_down":bool(fd.iloc[-(fractal_span+1)]),
   "market_structure":structure_bias,"market_structure_pattern":structure_pattern,
   "market_structure_break":structure_break,
   "market_structure_highs":[x[1] for x in last_highs],"market_structure_lows":[x[1] for x in last_lows],
