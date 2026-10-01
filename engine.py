@@ -184,15 +184,28 @@ class SignalEngine:
             else "WAIT"
         )
 
-        # ---------- Fractal + DMI veto layer ----------
+        # ---------- Fractal + DMI/ADX authority layer ----------
+        # This layer chooses direction before the legacy weighted votes.
+        # Fractal UP + -DI on top = PUT; Fractal DOWN + +DI on top = CALL.
+        # ADX must confirm a strong trend. When the engine disagrees, WAIT
+        # until the Fractal/DMI setup becomes strong enough to agree again.
         adx = v.get("adx")
         plus_di = v.get("plus_di")
         minus_di = v.get("minus_di")
         adx_ready = adx is not None and plus_di is not None and minus_di is not None
+        adx_threshold = 20.0
+        adx_strong = bool(adx_ready and adx >= adx_threshold)
         dmi_dir = "CALL" if adx_ready and plus_di > minus_di else "PUT" if adx_ready and minus_di > plus_di else "WAIT"
         fractal_veto_dir = fractal_dir if fractal_dir in ("CALL","PUT") else "WAIT"
-        fractal_dmi_conflict = bool(fractal_veto_dir in ("CALL","PUT") and dmi_dir in ("CALL","PUT") and fractal_veto_dir != dmi_dir)
-        fractal_dmi_veto = bool(fractal_dmi_conflict and adx_ready and adx >= 20)
+        fractal_dmi_match = bool(
+            adx_strong and fractal_veto_dir in ("CALL","PUT") and dmi_dir == fractal_veto_dir
+        )
+        fractal_dmi_conflict = bool(
+            fractal_veto_dir in ("CALL","PUT") and dmi_dir in ("CALL","PUT") and fractal_veto_dir != dmi_dir
+        )
+        fractal_dmi_veto = bool(adx_strong and fractal_dmi_conflict)
+        authority_direction = fractal_veto_dir if fractal_dmi_match else "WAIT"
+        engine_direction = "CALL" if call > put else "PUT" if put > call else "WAIT"
 
         # ---------- confirmation context ----------
         sk, sd = v.get("stoch_k"), v.get("stoch_d")
@@ -277,7 +290,7 @@ class SignalEngine:
             cci_clear = cci <= -100 and cci < cci_prev < cci_prev2
 
         reversal_evidence = []
-        leader_direction = "CALL" if call > put else "PUT" if put > call else "WAIT"
+        leader_direction = engine_direction
         weighted_margin = abs(call - put)
         leader_score = max(call, put)
         directional_votes = sum(1 for x in votes if x["direction"] == leader_direction)
@@ -401,7 +414,8 @@ class SignalEngine:
             confirmation_bonus += 2.0
 
         # Persistence remains short so the engine stays responsive.
-        raw_candidate = leader_direction if leader_direction in ("CALL", "PUT") else "WAIT"
+        # Fractal + ADX/DMI is authoritative for direction. The legacy engine is confirmation only.
+        raw_candidate = authority_direction if authority_direction in ("CALL", "PUT") else "WAIT"
         if raw_candidate == "WAIT":
             self.developing_strength = max(0.0, self.developing_strength - 0.10)
             if self.developing_strength <= 0.05:
@@ -469,6 +483,7 @@ class SignalEngine:
             1,
         )
 
+        engine_agrees = bool(raw_candidate in ("CALL", "PUT") and engine_direction == raw_candidate)
         full_ok = (
             raw_candidate != "WAIT"
             and candidate_persistent
@@ -479,6 +494,7 @@ class SignalEngine:
             and not safety_block
             and not (cci_clear and cci_trend_dir != leader_direction)
             and not (cci_trend_dir in ("CALL", "PUT") and cci_trend_dir != leader_direction and abs(cci or 0) >= 100)
+            and engine_agrees
         )
 
         signal = raw_candidate if full_ok else "WAIT"
@@ -491,7 +507,13 @@ class SignalEngine:
         elif spike_block:
             reason = f"WAIT: spike protection blocked {leader_direction}; abnormal momentum is opposite or reversing"
         elif fractal_dmi_veto:
-            reason = f"WAIT: Fractal + DMI veto — fractal {fractal_veto_dir}, DMI {dmi_dir}"
+            reason = f"WAIT: Fractal + DMI conflict — fractal {fractal_veto_dir}, DMI {dmi_dir}; waiting for agreement"
+        elif not adx_strong:
+            reason = f"WAIT: ADX {adx:.1f} below strength threshold {adx_threshold:.0f}; waiting for a strong matching square"
+        elif not fractal_dmi_match:
+            reason = f"WAIT: Fractal + DMI/ADX have not formed a matching direction"
+        elif not engine_agrees:
+            reason = f"WAIT: Fractal/ADX chose {raw_candidate}, engine says {engine_direction}; waiting for agreement"
         elif confirmation_direction_block:
             reason = f"WAIT: Supertrend + DMI/ADX conflict with {leader_direction}; trend confirmation veto active"
         elif safety_block:
@@ -540,6 +562,12 @@ class SignalEngine:
             "fractal_veto_direction": fractal_veto_dir,
             "fractal_dmi_conflict": fractal_dmi_conflict,
             "fractal_dmi_veto": fractal_dmi_veto,
+            "adx_threshold": adx_threshold,
+            "adx_strong": adx_strong,
+            "fractal_dmi_match": fractal_dmi_match,
+            "authority_direction": authority_direction,
+            "engine_direction": engine_direction,
+            "engine_agrees": engine_agrees,
             "fcb_direction": fcb_dir,
             "fcb_upper": fcb_upper,
             "fcb_lower": fcb_lower,
