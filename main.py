@@ -8,6 +8,8 @@ from engine import SignalEngine
 from pocket_feed import PocketOptionFeed
 from pro_guards import apply_pro_guards
 from backtest import run_backtest
+from scanner_ml import scan as ml_scan
+from pipgems_context import confirm as pipgems_confirm
 logging.basicConfig(level=logging.INFO)
 app=FastAPI(title=APP_NAME)
 builder=CandleBuilder(TIMEFRAMES.get(settings.timeframe,60),settings.history_size)
@@ -18,7 +20,7 @@ SCAN_ASSETS=[]
 # Keep the live scanner lightweight on Render free tier. The selected asset
 # feed remains fully live; the AI scanner samples a smaller live subset instead
 # of opening a websocket subscription for every instrument at once.
-SCANNER_FEED_ASSETS=[]
+SCANNER_FEED_ASSETS=["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP"]
 scanner_builders={}
 scanner_engines={}
 scanner_ticks={}
@@ -79,6 +81,9 @@ def refresh_scanner():
             continue
         if ml.get("psar_signal") != direction:
             continue
+        pg=pipgems_confirm(b.snapshot(),direction)
+        if not pg.get("ready") or not pg.get("confirmed"):
+            continue
         candle_ts=b.candles[-1].ts
         until=_scanner_entry_window(asset,direction,float(ml.get("probability",0)),candle_ts,tf)
         remaining=max(0.0,until-now)
@@ -99,13 +104,21 @@ def refresh_scanner():
             "psar_reason":ml.get("psar_reason",""),
             "core_trend":ml.get("psar_signal","WAIT"),
             "margin":round(float(ml.get("margin",0)),1),
+            "pipgems_score":float(pg.get("score",0)),
+            "pipgems_confirmed":bool(pg.get("confirmed",False)),
+            "pipgems_reason":pg.get("reason",""),
+            "ema20":pg.get("ema20"),
+            "ema40":pg.get("ema40"),
+            "ema_separation":pg.get("ema_separation"),
+            "support":pg.get("support"),
+            "resistance":pg.get("resistance"),
             "qualified":True,
             "age":round(age,2),
             "entry_remaining":round(remaining,1),
             "entry_open":True,
             "reason":ml.get("reason","Vitaly Random Forest scanner")
         })
-    ranked.sort(key=lambda x:(x["ml_probability"],x["margin"],x["ml_accuracy"] or 0),reverse=True)
+    ranked.sort(key=lambda x:(x["ml_probability"],x["margin"],x.get("pipgems_score",0),x["ml_accuracy"] or 0),reverse=True)
     scanner_candidates=ranked[:10]
     return scanner_candidates
 
@@ -202,7 +215,12 @@ async def startup():
  global feed,feed_task,scanner_feed,scanner_task,scanner_loop_task
  feed=PocketOptionFeed(settings.ws_url,settings.auth_json,on_tick,on_history,asset=state["asset"],period=TIMEFRAMES.get(state["timeframe"],60))
  feed_task=asyncio.create_task(feed.run())
- logging.info("%s started; auth configured=%s; background AI scanner disabled",APP_NAME,bool(settings.auth_json))
+ scanner_assets=set(SCANNER_FEED_ASSETS)
+ scanner_assets.add(state["asset"])
+ scanner_feed=PocketOptionFeed(settings.ws_url,settings.auth_json,scanner_tick,scanner_history,asset=state["asset"],period=TIMEFRAMES.get(state["timeframe"],60),assets=scanner_assets,on_history_asset=scanner_history)
+ scanner_task=asyncio.create_task(scanner_feed.run())
+ scanner_loop_task=asyncio.create_task(scanner_loop())
+ logging.info("%s started; auth configured=%s; AI scanner enabled=%s",APP_NAME,bool(settings.auth_json),bool(scanner_feed))
 @app.on_event("shutdown")
 async def shutdown():
  if feed:await feed.stop()
@@ -217,7 +235,7 @@ async def health():
  return {"service":APP_NAME,"feed":"LIVE" if live else "WAITING","engine":"READY" if builder.candles else "WAITING_FOR_FEED","last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","auth_configured":bool(settings.auth_json),"error":feed.last_error if feed else ""}
 @app.get("/api/scanner")
 async def api_scanner():
- return {"enabled":False,"candidates":[]}
+ return {"enabled":bool(scanner_feed and scanner_feed.connected),"candidates":refresh_scanner()}
 
 @app.get("/api/state")
 async def api_state():
@@ -225,7 +243,7 @@ async def api_state():
  entry_remaining=max(0.0,state["entry_until"]-time.time()) if state["entry_until"] else 0.0
  if state["entry_until"] and (state["entry_signal"] != state["signal"].get("signal") or state["signal"].get("signal") not in ("CALL","PUT")):
   state["entry_until"]=0.0; state["entry_signal"]="WAIT"; entry_remaining=0.0
- return {"app":APP_NAME,"asset":state["asset"],"timeframe":state["timeframe"],"payout":settings.payout,"expiry":settings.expiry_minutes,"price":state["price"],"last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","feed_connected":bool(feed and feed.connected),"candles":builder.snapshot()[-120:],"indicators":state["indicators"],"signal":state["signal"],"scanner":{"enabled":False,"candidates":[]},"entry_remaining":round(entry_remaining,1),"entry_open":entry_remaining>0}
+ return {"app":APP_NAME,"asset":state["asset"],"timeframe":state["timeframe"],"payout":settings.payout,"expiry":settings.expiry_minutes,"price":state["price"],"last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","feed_connected":bool(feed and feed.connected),"candles":builder.snapshot()[-120:],"indicators":state["indicators"],"signal":state["signal"],"scanner":{"enabled":bool(scanner_feed and scanner_feed.connected),"candidates":scanner_candidates},"entry_remaining":round(entry_remaining,1),"entry_open":entry_remaining>0}
 @app.get("/api/backtest")
 async def api_backtest():
  return run_backtest(builder.snapshot(),settings.min_confidence,150)
