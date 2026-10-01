@@ -116,7 +116,7 @@ class SignalEngine:
         fd = v.get("fractal_down")
         fu = v.get("fractal_up")
         fractal_dir = "CALL" if fd and not fu else "PUT" if fu and not fd else "WAIT"
-        vote("Fractal (2)", fractal_dir, 4.0)
+        vote(f"Fractal ({v.get(\"fractal_span\",2)})", fractal_dir, 4.0)
 
         psar = v.get("psar")
         psar_dir = "CALL" if price is not None and psar is not None and price > psar else "PUT" if price is not None and psar is not None and price < psar else "WAIT"
@@ -184,13 +184,17 @@ class SignalEngine:
             else "WAIT"
         )
 
-        # ---------- confirmation context ----------
+        # ---------- Fractal + DMI veto layer ----------
         adx = v.get("adx")
         plus_di = v.get("plus_di")
         minus_di = v.get("minus_di")
         adx_ready = adx is not None and plus_di is not None and minus_di is not None
         dmi_dir = "CALL" if adx_ready and plus_di > minus_di else "PUT" if adx_ready and minus_di > plus_di else "WAIT"
+        fractal_veto_dir = fractal_dir if fractal_dir in ("CALL","PUT") else "WAIT"
+        fractal_dmi_conflict = bool(fractal_veto_dir in ("CALL","PUT") and dmi_dir in ("CALL","PUT") and fractal_veto_dir != dmi_dir)
+        fractal_dmi_veto = bool(fractal_dmi_conflict and adx_ready and adx >= 20)
 
+        # ---------- confirmation context ----------
         sk, sd = v.get("stoch_k"), v.get("stoch_d")
         stoch_ready = sk is not None and sd is not None
         stoch_dir = "CALL" if stoch_ready and sk > sd else "PUT" if stoch_ready and sk < sd else "WAIT"
@@ -446,6 +450,7 @@ class SignalEngine:
         safety_block = (
             core_direction_block
             or exhaustion_block
+            or fractal_dmi_veto
             or spike_block
             or confirmation_direction_block
         )
@@ -485,6 +490,8 @@ class SignalEngine:
             )
         elif spike_block:
             reason = f"WAIT: spike protection blocked {leader_direction}; abnormal momentum is opposite or reversing"
+        elif fractal_dmi_veto:
+            reason = f"WAIT: Fractal + DMI veto — fractal {fractal_veto_dir}, DMI {dmi_dir}"
         elif confirmation_direction_block:
             reason = f"WAIT: Supertrend + DMI/ADX conflict with {leader_direction}; trend confirmation veto active"
         elif safety_block:
@@ -524,6 +531,15 @@ class SignalEngine:
             "stoch_k": sk,
             "stoch_d": sd,
             "dmi_direction": dmi_dir,
+            "adx_period": 14,
+            "adx_smoothing": 7,
+            "dmi_plus_color": "green",
+            "dmi_minus_color": "red",
+            "show_adx_line": False,
+            "fractal_span": v.get("fractal_span", 2),
+            "fractal_veto_direction": fractal_veto_dir,
+            "fractal_dmi_conflict": fractal_dmi_conflict,
+            "fractal_dmi_veto": fractal_dmi_veto,
             "fcb_direction": fcb_dir,
             "fcb_upper": fcb_upper,
             "fcb_lower": fcb_lower,
