@@ -7,13 +7,24 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import websockets
 
-log = logging.getLogger("alucard.feed")
-# Keep high-volume feed diagnostics off on the Render free tier.
+log = logging.getLogger("ichigo.feed")
 log.setLevel(logging.WARNING)
 
 
 class PocketOptionFeed:
     """Signal-only Pocket Option market feed."""
+
+    LIVE_HOSTS = [
+        "api-eu.po.market",
+        "api-msk.po.market",
+        "api-spb.po.market",
+        "api-us-north.po.market",
+        "api-us-south.po.market",
+    ]
+    DEMO_HOSTS = [
+        "demo-api-eu.po.market",
+        "try-demo-eu.po.market",
+    ]
 
     def __init__(self, url, auth_json, on_tick, on_history=None, asset="EURUSD_otc", period=60, assets=None, on_history_asset=None):
         self.url = url
@@ -39,20 +50,66 @@ class PocketOptionFeed:
         self._update_assets_samples = 0
         self._region_index = 0
 
+    def _is_demo(self):
+        """Detect demo mode from the captured auth payload."""
+        raw = self.auth_json.strip()
+        try:
+            if raw.startswith("42"):
+                packet = json.loads(raw[2:])
+                if isinstance(packet, list) and len(packet) >= 2 and isinstance(packet[1], dict):
+                    value = packet[1].get("isDemo")
+                    return str(value).lower() in {"1", "true", "yes"}
+            data = json.loads(raw)
+            if isinstance(data, list) and len(data) >= 2 and isinstance(data[1], dict):
+                value = data[1].get("isDemo")
+                return str(value).lower() in {"1", "true", "yes"}
+            if isinstance(data, dict):
+                value = data.get("isDemo")
+                if value is None and isinstance(data.get("data"), dict):
+                    value = data["data"].get("isDemo")
+                return str(value).lower() in {"1", "true", "yes"}
+        except Exception:
+            pass
+        return False
+
     def _url(self):
         raw = self.url.strip()
+        demo = self._is_demo()
+        hosts = self.DEMO_HOSTS if demo else self.LIVE_HOSTS
+
         if not raw:
-            raw = "wss://api-us-south.po.market/socket.io/?EIO=4&transport=websocket"
+            raw = f"wss://{hosts[0]}/socket.io/?EIO=4&transport=websocket"
+
         parsed = urlparse(raw)
-        hosts = ["api-eu.po.market", "api-msk.po.market", "api-spb.po.market", "api-us-north.po.market", "api-us-south.po.market"]
-        if parsed.netloc in hosts:
+        configured_host = parsed.netloc.lower()
+
+        # If the configured URL is one of our Pocket Option cluster aliases,
+        # rotate only within the correct demo/live cluster. Demo sessions must
+        # never be sent to the live api-*.po.market hosts.
+        known_hosts = set(self.LIVE_HOSTS + self.DEMO_HOSTS)
+        if configured_host in known_hosts or configured_host.endswith(".po.market"):
             host = hosts[self._region_index % len(hosts)]
-            raw = urlunparse((parsed.scheme or "wss", host, parsed.path or "/socket.io/", "", parsed.query, ""))
+            raw = urlunparse((
+                parsed.scheme or "wss",
+                host,
+                parsed.path or "/socket.io/",
+                "",
+                parsed.query,
+                "",
+            ))
+
         p = urlparse(raw)
         q = parse_qs(p.query)
         q["EIO"] = ["4"]
         q["transport"] = ["websocket"]
-        return urlunparse((p.scheme or "wss", p.netloc, p.path or "/socket.io/", "", urlencode(q, doseq=True), ""))
+        return urlunparse((
+            p.scheme or "wss",
+            p.netloc,
+            p.path or "/socket.io/",
+            "",
+            urlencode(q, doseq=True),
+            "",
+        ))
 
     def _auth_payload(self):
         if not self.auth_json.strip():
@@ -77,9 +134,6 @@ class PocketOptionFeed:
             data = data.get("data") or {}
         if not isinstance(data, dict):
             return None
-
-        # Normalize the current Pocket Option auth protocol while preserving
-        # the captured session, uid, and demo/real fields.
         payload = dict(data)
         payload.setdefault("platform", 2)
         payload.setdefault("isFastHistory", True)
@@ -87,7 +141,6 @@ class PocketOptionFeed:
         return payload
 
     def _auth_packets(self):
-        """Return auth frames in safest-to-most-normalized order."""
         packets = []
         raw = self.auth_json.strip()
         if raw.startswith("42"):
@@ -112,7 +165,6 @@ class PocketOptionFeed:
         return "42" + json.dumps([event, payload], separators=(",", ":"))
 
     def _wire_asset(self, asset=None):
-        """Return the symbol format expected by Pocket Option's wire protocol."""
         name = str(asset or self.asset)
         upper = name.upper().lstrip("#")
         stock_symbols = {"AAPL", "MSFT", "AMZN", "TSLA", "GOOGL", "META", "NFLX", "NVDA", "VISA", "BA", "AMD", "INTC", "PFE", "COIN", "BABA", "MCD", "PYPL", "CSCO", "JPM", "JNJ", "XOM", "AXP", "FB", "VIX", "CITI", "GME", "PLTR", "MARA"}
@@ -128,43 +180,22 @@ class PocketOptionFeed:
         for asset in sorted(self.assets):
             wire_asset = self._wire_asset(asset)
             await ws.send(self._event_packet("subscribeSymbol", {"asset": wire_asset}))
-            await ws.send(self._event_packet("changeSymbol", {
-                "asset": wire_asset,
-                "period": self.period,
-            }))
+            await ws.send(self._event_packet("changeSymbol", {"asset": wire_asset, "period": self.period}))
             await ws.send(self._event_packet("subfor", {"asset": wire_asset}))
 
     async def change_subscription(self, asset, period):
-        """Switch the live Pocket Option subscription without restarting the service."""
         try:
             period = int(period)
         except (TypeError, ValueError):
             raise ValueError("Invalid timeframe period")
-
         if not asset:
             raise ValueError("Asset is required")
-
         self.asset = str(asset).lstrip("#")
         self.period = period
-        # Keep exactly one active subscription: the currently selected asset.
-        # This prevents stale subscriptions from consuming the feed and makes
-        # Apply reliably switch the live stream to the selected instrument.
         self.assets = {self.asset}
-
         if self.ws and self.connected and self.authenticated:
             await self._subscribe(self.ws)
-            log.info(
-                "Pocket Option subscription changed to %s/%ss",
-                self.asset,
-                self.period,
-            )
             return True
-
-        log.info(
-            "Pocket Option subscription queued for reconnect: %s/%ss",
-            self.asset,
-            self.period,
-        )
         return False
 
     async def _keepalive(self, ws):
@@ -227,7 +258,6 @@ class PocketOptionFeed:
         if not str(first).startswith("0"):
             raise RuntimeError(f"unexpected Engine.IO handshake: {str(first)[:120]}")
         await ws.send("40")
-
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             msg = await asyncio.wait_for(ws.recv(), timeout=max(1, deadline - time.monotonic()))
@@ -237,7 +267,6 @@ class PocketOptionFeed:
                 return
             if str(msg) == "2":
                 await ws.send("3")
-
         raise RuntimeError("Socket.IO namespace handshake timed out")
 
     async def _authenticate(self, ws):
@@ -246,45 +275,32 @@ class PocketOptionFeed:
             raise RuntimeError("PO_AUTH_JSON is not configured")
         await ws.send(packets[0])
         auth_attempt = 0
-
         auth_deadline = time.monotonic() + 45
         while time.monotonic() < auth_deadline:
             msg = await asyncio.wait_for(ws.recv(), timeout=max(1, auth_deadline - time.monotonic()))
             if isinstance(msg, bytes):
                 continue
-
             text_msg = str(msg)
             if text_msg == "2":
                 await ws.send("3")
                 continue
             if text_msg.startswith("41"):
                 raise RuntimeError(f"Pocket Option authorization rejected: {text_msg[:200]}")
-
             decoded = self._decode_socket_packet(text_msg)
             if decoded is None:
                 continue
             event, body, count = decoded
-
             if count:
                 attachments = []
                 for _ in range(count):
-                    attachment = await asyncio.wait_for(
-                        ws.recv(), timeout=max(1, auth_deadline - time.monotonic())
-                    )
-                    attachments.append(attachment)
+                    attachments.append(await asyncio.wait_for(ws.recv(), timeout=max(1, auth_deadline - time.monotonic())))
                 body = self._replace_placeholders(body, attachments)
-
             if event == "successauth":
                 self.authenticated = True
-                log.info("Pocket Option authorization accepted")
                 return
-            if event == "updateAssets":
-                log.info("Pocket Option auth-stage assets received; continuing authorization wait")
-                if len(packets) > 1 and auth_attempt == 0:
-                    auth_attempt = 1
-                    await ws.send(packets[1])
-                    log.info("Pocket Option auth retry: normalized session payload")
-
+            if event == "updateAssets" and len(packets) > 1 and auth_attempt == 0:
+                auth_attempt = 1
+                await ws.send(packets[1])
         raise RuntimeError("Pocket Option authorization response not received")
 
     def _price_bounds(self):
@@ -316,12 +332,9 @@ class PocketOptionFeed:
         return low <= value <= high
 
     def _extract_binary_tick(self, data):
-        """Decode the compact Pocket Option stream frame."""
         if not isinstance(data, (bytes, bytearray)) or len(data) < 5:
             return None
-
         raw = bytes(data)
-
         try:
             decoded = json.loads(raw.decode("utf-8"))
             if isinstance(decoded, list):
@@ -340,10 +353,8 @@ class PocketOptionFeed:
                         return self._display_asset(asset) or self.asset, price, stamp
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             pass
-
         if len(raw) < 36:
             return None
-
         try:
             values = struct.unpack("<IdIfffff", raw[:36])
             if self._valid_price(values[1], self.asset):
@@ -353,7 +364,6 @@ class PocketOptionFeed:
                 return self._display_asset(self.asset), float(values[1]), stamp
         except struct.error:
             pass
-
         for offset in range(1, min(17, len(raw) - 35)):
             try:
                 values = struct.unpack("<IdIfffff", raw[offset:offset + 36])
@@ -367,7 +377,6 @@ class PocketOptionFeed:
             if stamp > 10_000_000_000:
                 stamp /= 1000.0
             return self._display_asset(self.asset), float(values[1]), stamp
-
         return None
 
     def _extract_history(self, body):
@@ -437,29 +446,13 @@ class PocketOptionFeed:
                 return asset, price, ts
         return None
 
-    @staticmethod
-    def _safe_body_summary(body, limit=1600):
-        if isinstance(body, (bytes, bytearray)):
-            raw = bytes(body)
-            preview = raw[:limit]
-            try:
-                text = preview.decode("utf-8")
-                return f"bytes={len(raw)} utf8={text!r}"
-            except UnicodeDecodeError:
-                return f"bytes={len(raw)} hex={preview[:96].hex()}"
-        try:
-            return json.dumps(body, separators=(",", ":"), default=str)[:limit]
-        except Exception:
-            return repr(body)[:limit]
-
     async def run(self):
         self.running = True
         delay = 2
-
         while self.running:
             try:
                 url = self._url()
-                log.info("connecting to Pocket Option websocket")
+                log.warning("FEED: trying %s (%s mode)", url, "DEMO" if self._is_demo() else "LIVE")
                 async with websockets.connect(
                     url,
                     ping_interval=20,
@@ -480,21 +473,14 @@ class PocketOptionFeed:
                     self._update_stream_rejected_samples = 0
                     self._update_assets_samples = 0
                     delay = 2
-
                     await self._handshake(ws)
                     await self._authenticate(ws)
                     await self._subscribe(ws)
-                    log.info(
-                        "Pocket Option feed authenticated; subscribed to %s/%ss",
-                        self.asset,
-                        self.period,
-                    )
 
                     keepalive_task = asyncio.create_task(self._keepalive(ws))
                     try:
                         while self.running:
                             msg = await ws.recv()
-
                             if isinstance(msg, bytes):
                                 parsed_binary = self._extract_binary_tick(msg)
                                 if parsed_binary:
@@ -505,10 +491,6 @@ class PocketOptionFeed:
                                     self.last_tick_latency_ms = max(0.0, (received_at - self.last_market_ts) * 1000.0) if self.last_market_ts else None
                                     self.last_tick_source = "binary"
                                     self.on_tick(asset, price, ts)
-                                    if self._update_stream_samples < 5:
-                                        log.debug("Pocket Option binary market tick received: %s %.8f latency_ms=%.1f", asset, price, self.last_tick_latency_ms or 0.0)
-                                else:
-                                    log.debug("Pocket Option binary frame received: %d bytes hex=%s", len(msg), msg[:32].hex())
                                 continue
 
                             text_msg = str(msg)
@@ -518,42 +500,18 @@ class PocketOptionFeed:
                             if text_msg == "3":
                                 continue
                             if text_msg.startswith("1"):
-                                raise RuntimeError(
-                                    f"Pocket Option websocket closed: {text_msg[:200]}"
-                                )
+                                raise RuntimeError(f"Pocket Option websocket closed: {text_msg[:200]}")
 
                             decoded = self._decode_socket_packet(text_msg)
                             if decoded is None:
-                                if text_msg:
-                                    log.debug("Pocket Option non-event message: %s", text_msg[:180])
                                 continue
 
                             event, body, count = decoded
-
                             if count:
                                 attachments = []
                                 for _ in range(count):
                                     attachments.append(await ws.recv())
                                 body = self._replace_placeholders(body, attachments)
-
-                            if event == "updateAssets" and self._update_assets_samples < 2:
-                                self._update_assets_samples += 1
-                                log.debug(
-                                    "Pocket Option updateAssets diagnostic %d: %s",
-                                    self._update_assets_samples,
-                                    self._safe_body_summary(body, 2200),
-                                )
-
-                            if event == "updateStream" and self._update_stream_samples < 5:
-                                self._update_stream_samples += 1
-                                log.debug(
-                                    "Pocket Option updateStream sample %d: %s",
-                                    self._update_stream_samples,
-                                    self._safe_body_summary(body, 2200),
-                                )
-
-                            if event != "updateStream":
-                                log.debug("Pocket Option event received: %s body_type=%s attachments=%d", event, type(body).__name__, count)
 
                             if event == "updateHistoryNewFast" and (self.on_history or self.on_history_asset):
                                 history = self._extract_history(body)
@@ -563,7 +521,6 @@ class PocketOptionFeed:
                                         self.on_history_asset(history_asset, history)
                                     elif self.on_history:
                                         self.on_history(history)
-                                    log.debug("Pocket Option historical candles loaded: %d for %s", len(history), self._display_asset(body.get("asset") or body.get("symbol") or self.asset) if isinstance(body, dict) else self.asset)
 
                             parsed = self._extract_event(event, body)
                             if parsed:
@@ -577,33 +534,20 @@ class PocketOptionFeed:
                                 self.last_tick_latency_ms = max(0.0, (received_at - stamp) * 1000.0) if stamp else None
                                 self.last_tick_source = event
                                 self.on_tick(asset, price, stamp)
-                                if self._update_stream_samples <= 5:
-                                    log.debug("Pocket Option market tick received: %s %.8f latency_ms=%.1f", asset, price, self.last_tick_latency_ms or 0.0)
-                            elif event == "updateStream":
-                                if self._update_stream_rejected_samples < 5:
-                                    self._update_stream_rejected_samples += 1
-                                    log.debug(
-                                        "Pocket Option rejected updateStream for %s: %s",
-                                        self.asset,
-                                        self._safe_body_summary(body, 1800),
-                                    )
-                            elif event in {"updateHistoryNewFast", "successauth"}:
-                                log.debug("Pocket Option market event had no valid price: %s", event)
                     finally:
                         keepalive_task.cancel()
                         try:
                             await keepalive_task
                         except asyncio.CancelledError:
                             pass
-
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.connected = False
                 self.authenticated = False
                 self.last_error = repr(exc)
-                self._region_index = (self._region_index + 1) % 5
-                log.warning("feed disconnected: %s (%s); rotating websocket region", exc, type(exc).__name__)
+                self._region_index = (self._region_index + 1) % (len(self.DEMO_HOSTS) if self._is_demo() else len(self.LIVE_HOSTS))
+                log.warning("FEED: connection error: %r; rotating endpoint", exc)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
             finally:
