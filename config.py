@@ -32,4 +32,7 @@ class Settings:
  stale_seconds:float=float(os.getenv("STALE_SECONDS","8"))
  entry_seconds:int=int(os.getenv("ENTRY_SECONDS","12"))
  history_size:int=int(os.getenv("HISTORY_SIZE","250"))
+ adx_period:int=int(os.getenv("ADX_PERIOD","14"))
+ adx_smoothing:int=int(os.getenv("ADX_SMOOTHING","7"))
+ fractal_span:int=int(os.getenv("FRACTAL_SPAN","2"))
 settings=Settings()
