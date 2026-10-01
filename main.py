@@ -8,6 +8,8 @@ from engine import SignalEngine
 from pocket_feed import PocketOptionFeed
 from pro_guards import apply_pro_guards
 from backtest import run_backtest
+from scanner_ml import scan as ml_scan
+from pipgems_context import confirm as pipgems_confirm
 logging.basicConfig(level=logging.INFO)
 app=FastAPI(title=APP_NAME)
 builder=CandleBuilder(TIMEFRAMES.get(settings.timeframe,60),settings.history_size)
@@ -18,7 +20,7 @@ SCAN_ASSETS=[]
 # Keep the live scanner lightweight on Render free tier. The selected asset
 # feed remains fully live; the AI scanner samples a smaller live subset instead
 # of opening a websocket subscription for every instrument at once.
-SCANNER_FEED_ASSETS=[]
+SCANNER_FEED_ASSETS=["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURGBP"]
 scanner_builders={}
 scanner_engines={}
 scanner_ticks={}
@@ -79,6 +81,9 @@ def refresh_scanner():
             continue
         if ml.get("psar_signal") != direction:
             continue
+        pg=pipgems_confirm(b.snapshot(),direction)
+        if not pg.get("ready") or not pg.get("confirmed"):
+            continue
         candle_ts=b.candles[-1].ts
         until=_scanner_entry_window(asset,direction,float(ml.get("probability",0)),candle_ts,tf)
         remaining=max(0.0,until-now)
@@ -99,13 +104,21 @@ def refresh_scanner():
             "psar_reason":ml.get("psar_reason",""),
             "core_trend":ml.get("psar_signal","WAIT"),
             "margin":round(float(ml.get("margin",0)),1),
+            "pipgems_score":float(pg.get("score",0)),
+            "pipgems_confirmed":bool(pg.get("confirmed",False)),
+            "pipgems_reason":pg.get("reason",""),
+            "ema20":pg.get("ema20"),
+            "ema40":pg.get("ema40"),
+            "ema_separation":pg.get("ema_separation"),
+            "support":pg.get("support"),
+            "resistance":pg.get("resistance"),
             "qualified":True,
             "age":round(age,2),
             "entry_remaining":round(remaining,1),
             "entry_open":True,
             "reason":ml.get("reason","Vitaly Random Forest scanner")
         })
-    ranked.sort(key=lambda x:(x["ml_probability"],x["margin"],x["ml_accuracy"] or 0),reverse=True)
+    ranked.sort(key=lambda x:(x["ml_probability"],x["margin"],x.get("pipgems_score",0),x["ml_accuracy"] or 0),reverse=True)
     scanner_candidates=ranked[:10]
     return scanner_candidates
 
@@ -202,7 +215,12 @@ async def startup():
  global feed,feed_task,scanner_feed,scanner_task,scanner_loop_task
  feed=PocketOptionFeed(settings.ws_url,settings.auth_json,on_tick,on_history,asset=state["asset"],period=TIMEFRAMES.get(state["timeframe"],60))
  feed_task=asyncio.create_task(feed.run())
- logging.info("%s started; auth configured=%s; background AI scanner disabled",APP_NAME,bool(settings.auth_json))
+ scanner_assets=set(SCANNER_FEED_ASSETS)
+ scanner_assets.add(state["asset"])
+ scanner_feed=PocketOptionFeed(settings.ws_url,settings.auth_json,scanner_tick,scanner_history,asset=state["asset"],period=TIMEFRAMES.get(state["timeframe"],60),assets=scanner_assets,on_history_asset=scanner_history)
+ scanner_task=asyncio.create_task(scanner_feed.run())
+ scanner_loop_task=asyncio.create_task(scanner_loop())
+ logging.info("%s started; auth configured=%s; AI scanner enabled=%s",APP_NAME,bool(settings.auth_json),bool(scanner_feed))
 @app.on_event("shutdown")
 async def shutdown():
  if feed:await feed.stop()
@@ -217,7 +235,7 @@ async def health():
  return {"service":APP_NAME,"feed":"LIVE" if live else "WAITING","engine":"READY" if builder.candles else "WAITING_FOR_FEED","last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","auth_configured":bool(settings.auth_json),"error":feed.last_error if feed else ""}
 @app.get("/api/scanner")
 async def api_scanner():
- return {"enabled":False,"candidates":[]}
+ return {"enabled":bool(scanner_feed and scanner_feed.connected),"candidates":refresh_scanner()}
 
 @app.get("/api/state")
 async def api_state():
@@ -225,7 +243,7 @@ async def api_state():
  entry_remaining=max(0.0,state["entry_until"]-time.time()) if state["entry_until"] else 0.0
  if state["entry_until"] and (state["entry_signal"] != state["signal"].get("signal") or state["signal"].get("signal") not in ("CALL","PUT")):
   state["entry_until"]=0.0; state["entry_signal"]="WAIT"; entry_remaining=0.0
- return {"app":APP_NAME,"asset":state["asset"],"timeframe":state["timeframe"],"payout":settings.payout,"expiry":settings.expiry_minutes,"price":state["price"],"last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","feed_connected":bool(feed and feed.connected),"candles":builder.snapshot()[-120:],"indicators":state["indicators"],"signal":state["signal"],"scanner":{"enabled":False,"candidates":[]},"entry_remaining":round(entry_remaining,1),"entry_open":entry_remaining>0}
+ return {"app":APP_NAME,"asset":state["asset"],"timeframe":state["timeframe"],"payout":settings.payout,"expiry":settings.expiry_minutes,"price":state["price"],"last_tick_age":age,"feed_tick_latency_ms":feed.last_tick_latency_ms if feed else None,"feed_tick_source":feed.last_tick_source if feed else "","feed_connected":bool(feed and feed.connected),"candles":builder.snapshot()[-120:],"indicators":state["indicators"],"signal":state["signal"],"scanner":{"enabled":bool(scanner_feed and scanner_feed.connected),"candidates":scanner_candidates},"entry_remaining":round(entry_remaining,1),"entry_open":entry_remaining>0}
 @app.get("/api/backtest")
 async def api_backtest():
  return run_backtest(builder.snapshot(),settings.min_confidence,150)
@@ -263,7 +281,7 @@ async def config(request:Request):
  return {"ok":True,"asset":new_asset,"timeframe":new_tf,"changed_asset":changed_asset,"changed_timeframe":changed_tf}
 HTML='''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>ICHIGO</title><style>
 *{box-sizing:border-box}body{margin:0;background:#08090d;color:#e9e9ee;font-family:system-ui,sans-serif;background:linear-gradient(90deg,rgba(5,6,10,.97),rgba(5,6,10,.76),rgba(5,6,10,.42)),url('/ichigo-bg.jpg') center/cover fixed no-repeat}header{padding:18px 22px;border-bottom:1px solid #262833;background:rgba(13,14,20,.78);backdrop-filter:blur(10px)}h1{margin:0;font-size:22px;letter-spacing:2px}.wrap{max-width:1200px;margin:auto;padding:18px}small,.label,.foot{color:#858b9b}.tabs,.controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.tab,select,button,.status{background:#151823;color:#eee;border:1px solid #343846;border-radius:8px;padding:9px 12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:#11131b;border:1px solid #252834;border-radius:12px;padding:15px;margin-top:12px}.label{font-size:11px;text-transform:uppercase}.value{font-size:23px;margin-top:7px;font-weight:700}.signal{font-size:32px;letter-spacing:2px}.call{color:#56e39f}.put{color:#ff6577}.wait{color:#f1c75b}.chart{height:330px;position:relative;overflow:hidden;border-radius:10px;background:rgba(4,5,9,.72);border:1px solid #252834}.chart canvas{width:100%;height:100%;display:block}.threshold{margin-top:12px;padding:12px;background:#171923;border:1px solid #2d3040;border-radius:10px}.thresholdLine{display:flex;align-items:center;justify-content:space-between;gap:12px}.threshold input{width:100%;accent-color:#ff6577}.thresholdValue{font-weight:900;min-width:54px;text-align:right;color:#ff9aa6}.matrix{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.matrix div{padding:10px;background:#171923;border-radius:7px;font-size:12px}.foot{font-size:12px;margin-top:18px}@media(max-width:800px){.grid{grid-template-columns:1fr 1fr}.matrix{grid-template-columns:1fr 1fr}}@media(max-width:500px){.value{font-size:18px}.signal{font-size:27px}}
-</style></head><body><header><div class="wrap"><h1>☠ ICHIGO SIGNAL BOT</h1><small>GOTHIC MARKET INTELLIGENCE • LIVE SIGNAL ENGINE</small></div></header><main class="wrap"><div class="tabs"><div class="tab">Signals</div><div class="tab">Trades</div><div class="tab">Performance</div><div class="tab">Settings</div></div><div class="controls"><select id="asset"></select><select id="tf"></select><button onclick="applyCfg()">APPLY</button><span id="feed" class="status">FEED: WAITING</span><span id="feedAge" class="status">AGE: —</span><span id="eng" class="status">ENGINE: WAITING</span></div><div class="threshold"><div class="thresholdLine"><div><div class="label">Probability threshold</div><small>Only show CALL/PUT when confidence meets this level</small></div><div id="thresholdValue" class="thresholdValue">78%</div></div><input id="threshold" type="range" min="50" max="99" step="1" value="78" aria-label="Probability threshold"></div><div class="grid"><div class="card"><div class="label">Signal</div><div id="sig" class="value signal wait">WAIT</div></div><div class="card"><div class="label">Entry Window</div><div id="count" class="value">—</div><small id="entryStatus">WAITING FOR SIGNAL</small></div><div class="card"><div class="label">LIVE CLOCK</div><div id="clock" class="value">--:--:--</div><small>LOCAL TIME • RUNNING</small></div><div class="card"><div class="label">Confidence</div><div id="conf" class="value">0%</div></div><div class="card"><div class="label">Asset</div><div id="as" class="value">EURUSD_otc</div></div><div class="card"><div class="label">Price</div><div id="price" class="value">—</div></div></div><div class="card"><div class="label">Moving market chart</div><div id="chart" class="chart"><canvas id="priceChart"></canvas></div></div><div class="card"><div class="label">Indicator matrix</div><div id="matrix" class="matrix"></div></div><div class="card"><div class="label">Engine reason</div><div id="reason" style="margin-top:8px">Waiting for live market data.</div></div><div class="foot">Signal-only architecture. No order execution is enabled. Entry window is dynamic and closes early if confirmation is lost.</div></main><script>
+</style></head><body><header><div class="wrap"><h1>☠ ICHIGO SIGNAL BOT</h1><small>GOTHIC MARKET INTELLIGENCE • LIVE SIGNAL ENGINE</small></div></header><main class="wrap"><div class="tabs"><div class="tab">Signals</div><div class="tab">Trades</div><div class="tab">Performance</div><div class="tab">Settings</div></div><div class="controls"><select id="asset"></select><select id="tf"></select><button onclick="applyCfg()">APPLY</button><span id="feed" class="status">FEED: WAITING</span><span id="feedAge" class="status">AGE: —</span><span id="eng" class="status">ENGINE: WAITING</span></div><div class="threshold"><div class="thresholdLine"><div><div class="label">Probability threshold</div><small>Only show CALL/PUT when confidence meets this level</small></div><div id="thresholdValue" class="thresholdValue">78%</div></div><input id="threshold" type="range" min="50" max="99" step="1" value="78" aria-label="Probability threshold"></div><div class="grid"><div class="card"><div class="label">Signal</div><div id="sig" class="value signal wait">WAIT</div></div><div class="card"><div class="label">Entry Window</div><div id="count" class="value">—</div><small id="entryStatus">WAITING FOR SIGNAL</small></div><div class="card"><div class="label">LIVE CLOCK</div><div id="clock" class="value">--:--:--</div><small>LOCAL TIME • RUNNING</small></div><div class="card"><div class="label">Confidence</div><div id="conf" class="value">0%</div></div><div class="card"><div class="label">Asset</div><div id="as" class="value">EURUSD_otc</div></div><div class="card"><div class="label">Price</div><div id="price" class="value">—</div></div></div><div class="card"><div class="label">Moving market chart</div><div id="chart" class="chart"><canvas id="priceChart"></canvas></div></div><div class="card"><div class="label">Indicator matrix</div><div id="matrix" class="matrix"></div></div><div class="card"><div class="label">AI Scanner • Vitaly RF + PipGems Context</div><div id="scanner">SCANNING FEED…</div></div><div class="card"><div class="label">Engine reason</div><div id="reason" style="margin-top:8px">Waiting for live market data.</div></div><div class="foot">Signal-only architecture. No order execution is enabled. Entry window is dynamic and closes early if confirmation is lost.</div></main><script>
 const $=id=>document.getElementById(id);let probabilityThreshold=Number(localStorage.getItem("ichigoProbabilityThreshold")||78);let lastCandles=[];let chartFrame=0;
 function initThreshold(){const el=$("threshold"),out=$("thresholdValue");if(!el)return;el.value=probabilityThreshold;out.textContent=probabilityThreshold+"%";el.oninput=()=>{probabilityThreshold=Number(el.value);out.textContent=probabilityThreshold+"%";localStorage.setItem("ichigoProbabilityThreshold",String(probabilityThreshold));if(window.lastState)render(window.lastState);};}
 function drawMovingChart(c){const canvas=$("priceChart"),box=$("chart");if(!canvas||!box)return;const d=devicePixelRatio||1,w=box.clientWidth,h=box.clientHeight;canvas.width=w*d;canvas.height=h*d;const x=canvas.getContext("2d");x.setTransform(d,0,0,d,0,0);x.clearRect(0,0,w,h);const cs=(c||[]).slice(-70);if(!cs.length){x.fillStyle="#858b9b";x.font="13px system-ui";x.fillText("Waiting for live candles…",16,28);return;}let lo=Math.min(...cs.map(q=>Number(q.low))),hi=Math.max(...cs.map(q=>Number(q.high)));const span=(hi-lo)||1,pad=14,vw=w-pad*2,vh=h-pad*2;const px=i=>pad+i*(vw/Math.max(1,cs.length-1)),py=v=>pad+(hi-v)/span*vh;x.strokeStyle="rgba(255,255,255,.07)";x.lineWidth=1;for(let i=1;i<5;i++){const yy=pad+i*vh/5;x.beginPath();x.moveTo(pad,yy);x.lineTo(w-pad,yy);x.stroke();}const bw=Math.max(3,(vw/cs.length)*.62);cs.forEach((q,i)=>{const xx=px(i),up=Number(q.close)>=Number(q.open);x.strokeStyle=up?"#56e39f":"#ff6577";x.fillStyle=x.strokeStyle;x.beginPath();x.moveTo(xx,py(Number(q.high)));x.lineTo(xx,py(Number(q.low)));x.stroke();const top=py(Math.max(Number(q.open),Number(q.close))),bot=py(Math.min(Number(q.open),Number(q.close)));x.fillRect(xx-bw/2,top,bw,Math.max(2,bot-top));});const latest=cs[cs.length-1];x.fillStyle="#fff";x.font="11px system-ui";x.fillText(Number(latest.close).toFixed(5),Math.max(pad,w-82),20);chartFrame++;if(window._chartAnimating){requestAnimationFrame(()=>drawMovingChart(lastCandles));}}
@@ -273,8 +291,9 @@ function updateClock(){const e=$("clock");if(e)e.textContent=new Date().toLocale
 async function getJson(u){const r=await fetch(u+"?t="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);return r.json();}
 async function applyCfg(){const b=document.querySelector("button[onclick='applyCfg()']");if(b)b.disabled=true;try{const r=await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store",body:JSON.stringify({asset:$("asset").value,timeframe:$("tf").value})});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||"Configuration failed");$("as").textContent=d.asset;$("sig").textContent="WAIT";$("sig").className="value signal wait";$("conf").textContent="0%";$("count").textContent="00:00";$("reason").textContent="Loading selected market data";}catch(e){console.error(e);}finally{if(b)b.disabled=false;}}
 function draw(c){lastCandles=c||[];drawMovingChart(lastCandles);}
+function scanner(cands){const e=$("scanner");if(!e)return;if(!cands||!cands.length){e.innerHTML='<small>NO QUALIFIED HIGH-MARGIN SETUP — scanner requires 90%+ RF probability, PSAR agreement, EMA trend separation, support/resistance room and candle confirmation.</small>';return;}e.innerHTML=cands.slice(0,5).map((x,i)=>'<div style="margin:8px 0;padding:9px;background:#171923;border-radius:7px"><b>#'+(i+1)+' '+x.asset+'</b> • <b>'+x.timeframe+'</b> • <span class="'+String(x.signal).toLowerCase()+'">'+x.signal+'</span><br><small>RF '+x.ml_probability+'% • Margin '+x.margin+'% • PipGems '+(x.pipgems_score||0)+'% • PSAR '+x.psar_signal+'</small><br><small>EMA20/40 separation '+(x.ema_separation||0)+' • Entry '+(x.entry_open?'OPEN':'CLOSED')+' • '+(x.entry_remaining||0)+'s</small></div>').join('');}
 function matrix(v){const e=$("matrix");if(!e)return;const n=x=>typeof x==="number"?x.toFixed(5):"—",n2=x=>typeof x==="number"?x.toFixed(2):"—";const a=[["EMA 9 / 20 / 50",typeof v.ema9==="number"?[v.ema9,v.ema20,v.ema50].map(n).join(" / "):"—"],["Alligator",typeof v.alligator_lips==="number"?[v.alligator_lips,v.alligator_teeth,v.alligator_jaw].map(n).join(" / "):"—"],["Parabolic SAR",n(v.psar)],["MACD histogram",n(v.macd_hist)],["RSI",n2(v.rsi)],["CCI",n2(v.cci)],["Bollinger 20/2",typeof v.bb_pct==="number"?"%B "+n2(v.bb_pct)+" • W "+(typeof v.bb_width==="number"?v.bb_width.toFixed(4):"—"):"—"],["ADX / DMI",typeof v.adx==="number"?"ADX "+n2(v.adx)+" • +DI "+n2(v.plus_di)+" • -DI "+n2(v.minus_di):"—"],["Fractal Chaos Bands",typeof v.fcb_mid==="number"?(v.fcb_direction||"WAIT")+" • mid "+n(v.fcb_mid):"—"],["Stochastic",typeof v.stoch_k==="number"?"%K "+n2(v.stoch_k)+" • %D "+n2(v.stoch_d):"—"]];e.innerHTML=a.map(x=>"<div><b>"+x[0]+"</b><br>"+x[1]+"</div>").join("");}
-function render(s){window.lastState=s;$("as").textContent=s.asset||"—";$("price").textContent=s.price==null?"—":s.price;const z=s.signal||{},rawQ=z.signal||"WAIT",confidence=Number(z.confidence||0),qualified=confidence>=probabilityThreshold,q=qualified?rawQ:"WAIT";$("sig").textContent=q;$("sig").className="value signal "+q.toLowerCase();$("conf").textContent=confidence+"%";const r=Math.max(0,Number(s.entry_remaining||0));$("count").textContent=(q==="CALL"||q==="PUT")&&r>0?"00:"+String(Math.ceil(r)).padStart(2,"0"):"00:00";$("entryStatus").textContent=(q==="CALL"||q==="PUT")&&r>0?"ENTRY OPEN — VALIDATION ACTIVE":"ENTRY CLOSED — WAIT FOR NEXT SIGNAL";$("reason").textContent=!qualified&&(rawQ==="CALL"||rawQ==="PUT")?("Below probability threshold ("+probabilityThreshold+"%)"):z.reason||"Waiting for live market data.";draw(s.candles||[]);matrix(s.indicators||{});}
+function render(s){window.lastState=s;$("as").textContent=s.asset||"—";$("price").textContent=s.price==null?"—":s.price;const z=s.signal||{},rawQ=z.signal||"WAIT",confidence=Number(z.confidence||0),qualified=confidence>=probabilityThreshold,q=qualified?rawQ:"WAIT";$("sig").textContent=q;$("sig").className="value signal "+q.toLowerCase();$("conf").textContent=confidence+"%";const r=Math.max(0,Number(s.entry_remaining||0));$("count").textContent=(q==="CALL"||q==="PUT")&&r>0?"00:"+String(Math.ceil(r)).padStart(2,"0"):"00:00";$("entryStatus").textContent=(q==="CALL"||q==="PUT")&&r>0?"ENTRY OPEN — VALIDATION ACTIVE":"ENTRY CLOSED — WAIT FOR NEXT SIGNAL";$("reason").textContent=!qualified&&(rawQ==="CALL"||rawQ==="PUT")?("Below probability threshold ("+probabilityThreshold+"%)"):z.reason||"Waiting for live market data.";draw(s.candles||[]);matrix(s.indicators||{});scanner((s.scanner||{}).candidates||[]);}
 async function poll(){try{render(await getJson("/api/state"));}catch(e){console.warn("state",e);}try{const h=await getJson("/api/health");$("feed").textContent="FEED: "+(h.feed||"WAITING");$("feedAge").textContent="AGE: "+(h.last_tick_age==null?"—":Number(h.last_tick_age).toFixed(2)+"s")+" • NET "+(h.feed_tick_latency_ms==null?"—":Number(h.feed_tick_latency_ms).toFixed(0)+"ms");$("eng").textContent="ENGINE: "+(h.engine||"WAITING");}catch(e){console.warn("health",e);}}
 initThreshold();startChartAnimation();setInterval(updateClock,1000);setInterval(poll,1000);updateClock();poll();
 </script></body></html>'''
