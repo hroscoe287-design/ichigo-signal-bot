@@ -165,7 +165,7 @@ def refresh_entry_window(signal, candle_ts=None):
 def on_history(candles):
  loaded=builder.load_candles(candles)
  if loaded:
-  result=calculate(builder.snapshot())
+  result=calculate(builder.snapshot(),settings.adx_period,settings.adx_smoothing,settings.fractal_span)
   state["indicators"]=result.get("values",{})
   state["signal"]=engine.evaluate(result)
   state["signal"]=apply_pro_guards(state["signal"],state["indicators"],last_tick=state["last_tick"],timeframe_seconds=builder.timeframe,candle_ts=builder.candles[-1].ts if builder.candles else None)
